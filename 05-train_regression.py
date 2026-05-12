@@ -431,13 +431,12 @@ def train(args: argparse.Namespace) -> None:
             flush=True,
         )
     write_csv(out_dir / "train_epoch_metrics.csv", rows)
-    torch.save({"model_state_dict": model.state_dict(), "epoch": args.epochs, "config": config}, out_dir / "model_final.pt")
     save_json(out_dir / "train_summary.json", {
         "status": "ok",
         "final_epoch": rows[-1],
         "config": config,
     })
-    print(f"Done. Final checkpoint: {out_dir / 'model_final.pt'}")
+    print(f"Done. Per-epoch checkpoints saved to {out_dir}")
 
 
 def parse_args() -> argparse.Namespace:

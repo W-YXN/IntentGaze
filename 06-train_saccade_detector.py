@@ -480,19 +480,12 @@ def train(args: argparse.Namespace) -> None:
     rows = stage1_rows + stage2_rows
     write_csv(args.output_dir / "train_epoch_metrics.csv", rows)
     final_metrics = train_metrics(model, dataset, args.eval_batch_size)
-    checkpoint = {
-        "stage": "stage2_final",
-        "model_state_dict": model.state_dict(),
-        "config": config,
-        "final_train_metrics": final_metrics,
-    }
-    torch.save(checkpoint, args.output_dir / "best_model.pt")
     save_json(args.output_dir / "train_summary.json", {
         "status": "ok",
         "final_train_metrics": final_metrics,
         "config": config,
     })
-    print(f"Done. Final detector checkpoint: {args.output_dir / 'best_model.pt'}")
+    print(f"Done. Per-epoch checkpoints saved to {args.output_dir}")
 
 
 def parse_args() -> argparse.Namespace:

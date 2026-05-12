@@ -279,7 +279,7 @@ def write_manifest(path: Path, rows: list[dict[str, Any]]) -> None:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Resample IntentGaze CSV files to a 90 Hz grid.")
-    parser.add_argument("--input-dir", type=Path, default=SCRIPT_DIR / "Dataset" / "Dataset")
+    parser.add_argument("--input-dir", type=Path, default=SCRIPT_DIR / "Dataset")
     parser.add_argument("--output-dir", type=Path, default=SCRIPT_DIR / "resampled_csv")
     parser.add_argument("--workers", type=int, default=max(1, cpu_count() - 2))
     return parser.parse_args()
