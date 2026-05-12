@@ -1,0 +1,25 @@
+__pycache__/
+*.pyc
+
+# Dataset (download from OSF; do not commit)
+Dataset/
+*.zip
+*.zip.*
+
+# Pipeline intermediate outputs
+resampled_csv/
+session_csv/
+session_csv_transition/
+processed_csv/
+processed_csv_transition/
+npy_data/
+npy_data_transition/
+
+# Training outputs
+trained_regression/
+trained_saccade_detector/
+
+# OS / IDE
+.DS_Store
+.idea/
+.vscode/
