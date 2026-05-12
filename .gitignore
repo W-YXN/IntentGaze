@@ -19,6 +19,9 @@ npy_data_transition/
 trained_regression/
 trained_saccade_detector/
 
+# Pipeline summary files dumped at the base-dir level
+*.json
+
 # OS / IDE
 .DS_Store
 .idea/
