@@ -35,7 +35,6 @@ SOURCE_END_COL = "SourceEndIdx"
 
 FILENAME_PREFIX_REPLACE = {
     "TrialData_Saccade-Fixation_": "TDSF_",
-    "TrialData_Combined_": "TDC_",
     "TrialData_Pursuit_": "TDP_",
 }
 
