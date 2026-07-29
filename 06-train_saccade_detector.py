@@ -18,6 +18,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+import fold_split
+
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 
@@ -307,6 +309,49 @@ def resolve_train_files(main_dir: Path, transition_dir: Path, train_list: Path |
     return files
 
 
+def validate_fold_training_files(
+    files: list[Path], fold: dict[str, Any], normalization_params: dict[str, Any]
+) -> list[Path]:
+    """Keep only this fold's train subjects and verify fold-specific preprocessing."""
+    train_subjects = set(fold["train_subject_ids"])
+    selected: list[Path] = []
+    for path in files:
+        payload = np.load(path, allow_pickle=True).item()
+        subject_id = int(payload.get("subject_id", -1))
+        if subject_id not in train_subjects:
+            continue
+        if payload.get("fold_index") != fold["fold_index"]:
+            raise ValueError(f"{path}: expected fold_index {fold['fold_index']}, found {payload.get('fold_index')}")
+        if payload.get("norm_params") != normalization_params:
+            raise ValueError(f"{path}: normalization parameters do not match {fold['fold_name']}")
+        selected.append(path)
+    if not selected:
+        raise FileNotFoundError(f"No train-subject NPY files found for {fold['fold_name']}")
+    return selected
+
+
+def configure_fold(args: argparse.Namespace) -> None:
+    if args.fold_index is None:
+        args.main_dir = args.main_dir or (SCRIPT_DIR / "npy_data")
+        args.transition_dir = args.transition_dir or (SCRIPT_DIR / "npy_data_transition")
+        args.output_dir = args.output_dir or (SCRIPT_DIR / "trained_saccade_detector")
+        args.fold_info = None
+        args.fold_norm_params = None
+        return
+    if args.main_dir is not None or args.transition_dir is not None:
+        raise ValueError("--main-dir/--transition-dir cannot be combined with --fold-index; use --fold-base-dir instead")
+    fold = fold_split.build_fold_split(args.fold_index)
+    args.main_dir = args.fold_base_dir / f"npy_data_{fold['fold_name']}"
+    args.transition_dir = args.fold_base_dir / f"npy_data_transition_{fold['fold_name']}"
+    args.output_dir = args.output_dir or (args.fold_base_dir / f"trained_saccade_detector_{fold['fold_name']}")
+    norm_path = args.fold_base_dir / f"global_norm_params_{fold['fold_name']}.json"
+    if not norm_path.exists():
+        raise FileNotFoundError(f"Missing fold-specific normalization parameters: {norm_path}")
+    args.fold_info = fold
+    args.fold_norm_params = json.loads(norm_path.read_text(encoding="utf-8"))
+    args.fold_norm_path = norm_path
+
+
 def train_stage(
     model: SaccadeResTCN,
     dataset: GpuSaccadeWindowDataset,
@@ -391,6 +436,8 @@ def train(args: argparse.Namespace) -> None:
     set_seed(args.seed)
     device = torch.device(args.device if args.device else ("cuda" if torch.cuda.is_available() else "cpu"))
     files = resolve_train_files(args.main_dir, args.transition_dir, args.train_list)
+    if args.fold_info is not None:
+        files = validate_fold_training_files(files, args.fold_info, args.fold_norm_params)
     args.output_dir.mkdir(parents=True, exist_ok=True)
     dataset = GpuSaccadeWindowDataset(files, device, args.window_size, args.use_padding_mask)
     model = SaccadeResTCN(
@@ -404,6 +451,8 @@ def train(args: argparse.Namespace) -> None:
         "main_dir": str(args.main_dir),
         "transition_dir": str(args.transition_dir),
         "train_list": str(args.train_list) if args.train_list else "",
+        "fold": args.fold_info,
+        "fold_normalization_params": str(args.fold_norm_path) if args.fold_info else "",
         "output_dir": str(args.output_dir),
         "lr_schedule": {
             "type": "warmup_cosine_warm_restart",
@@ -490,10 +539,12 @@ def train(args: argparse.Namespace) -> None:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Train the published IntentGaze saccade detector.")
-    parser.add_argument("--main-dir", type=Path, default=SCRIPT_DIR / "npy_data")
-    parser.add_argument("--transition-dir", type=Path, default=SCRIPT_DIR / "npy_data_transition")
+    parser.add_argument("--main-dir", type=Path, default=None)
+    parser.add_argument("--transition-dir", type=Path, default=None)
     parser.add_argument("--train-list", type=Path, default=None, help="Optional text/CSV list of training npy files.")
-    parser.add_argument("--output-dir", type=Path, default=SCRIPT_DIR / "trained_saccade_detector")
+    parser.add_argument("--output-dir", type=Path, default=None)
+    parser.add_argument("--fold-index", type=int, default=None, help="0-based CV fold; uses matching fold NPY data and normalization parameters.")
+    parser.add_argument("--fold-base-dir", type=Path, default=SCRIPT_DIR, help="Directory containing fold-specific NPY and normalization files.")
     parser.add_argument("--stage1-epochs", type=int, required=True)
     parser.add_argument("--stage2-epochs", type=int, required=True)
     parser.add_argument("--stage1-batch-size", type=int, default=512)
@@ -523,6 +574,7 @@ def main() -> None:
     args = parse_args()
     if args.stage1_epochs <= 0 or args.stage2_epochs <= 0:
         raise ValueError("--stage1-epochs and --stage2-epochs must be positive")
+    configure_fold(args)
     train(args)
 
 

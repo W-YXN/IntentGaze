@@ -15,6 +15,8 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
+import fold_split
+
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 DEG_SCALE = 90.0
@@ -323,8 +325,8 @@ def output_metadata(df: pd.DataFrame, input_path: Path) -> dict[str, Any]:
     return meta
 
 
-def process_one(task: tuple[str, str, str, str]) -> dict[str, Any]:
-    path_s, input_root_s, output_root_s, norm_json_s = task
+def process_one(task: tuple[str, str, str, str, int | None]) -> dict[str, Any]:
+    path_s, input_root_s, output_root_s, norm_json_s, fold_index = task
     input_path = Path(path_s)
     input_root = Path(input_root_s)
     output_root = Path(output_root_s)
@@ -354,6 +356,8 @@ def process_one(task: tuple[str, str, str, str]) -> dict[str, Any]:
     }
     payload.update(targets)
     payload.update(output_metadata(df, input_path))
+    if fold_index is not None:
+        payload["fold_index"] = int(fold_index)
     if "SaccadeProb" in df.columns:
         payload["saccade_prob"] = pd.to_numeric(df["SaccadeProb"], errors="coerce").fillna(0).to_numpy(dtype=np.float32)
     else:
@@ -377,6 +381,8 @@ def process_one(task: tuple[str, str, str, str]) -> dict[str, Any]:
         "zero_gaze_frames": int(targets["is_zero_gaze"].sum()),
         "zero_intend_frames": int(targets["is_zero_intend"].sum()),
         "saccade_frames": int(targets["saccade_zero_target_mask"].sum()),
+        "subject_id": int(payload["subject_id"]),
+        "fold_index": fold_index,
     }
 
 
@@ -404,14 +410,39 @@ def collect_csv_files(base_dir: Path, input_names: list[str]) -> list[Path]:
     return sorted(files)
 
 
-def prepare_norm_params(base_dir: Path, jobs: list[dict[str, Any]], workers: int) -> Path:
-    norm_path = base_dir / "global_norm_params_shared.json"
-    files = collect_csv_files(base_dir, [j["input_name"] for j in jobs])
+def subject_id_for_csv(path: Path) -> int:
+    try:
+        values = pd.read_csv(path, usecols=[USER_COL], nrows=1)[USER_COL]
+    except Exception as exc:
+        raise ValueError(f"Could not read {USER_COL} from {path}: {exc}") from exc
+    if values.empty:
+        raise ValueError(f"{path}: no {USER_COL} value")
+    subject_id = pd.to_numeric(values.iloc[0], errors="coerce")
+    if not np.isfinite(subject_id):
+        raise ValueError(f"{path}: invalid {USER_COL} value {values.iloc[0]!r}")
+    return int(subject_id)
+
+
+def validate_cv_subjects(files: list[Path]) -> None:
+    observed = {subject_id_for_csv(path) for path in files}
+    unexpected = sorted(observed - fold_split.all_subjects())
+    if unexpected:
+        raise ValueError(
+            "CV preprocessing refuses unknown subject IDs. "
+            f"Observed IDs outside fold_split.py: {unexpected}"
+        )
+
+
+def files_for_subjects(files: list[Path], subject_ids: set[int]) -> list[Path]:
+    return [path for path in files if subject_id_for_csv(path) in subject_ids]
+
+
+def prepare_norm_params(norm_path: Path, files: list[Path], workers: int) -> Path:
     if not files:
-        raise FileNotFoundError("No processed CSV files found for global normalization")
+        raise FileNotFoundError("No processed CSV files found for normalization")
     tasks = [str(p) for p in files]
     n_workers = max(1, min(workers, len(tasks)))
-    print(f"[norm] scanning {len(tasks)} files with {n_workers} workers")
+    print(f"[norm] scanning {len(tasks)} files with {n_workers} workers -> {norm_path.name}")
     if n_workers == 1:
         stats = [stats_for_file(t) for t in tasks]
     else:
@@ -422,23 +453,44 @@ def prepare_norm_params(base_dir: Path, jobs: list[dict[str, Any]], workers: int
     return norm_path
 
 
-def apply_iqr_filter(rows: list[dict[str, Any]], output_dir: Path, k: float = 1.5) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+def apply_iqr_filter(
+    rows: list[dict[str, Any]],
+    output_dir: Path,
+    k: float = 1.5,
+    fit_subject_ids: set[int] | None = None,
+    removal_subject_ids: set[int] | None = None,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
     df = pd.DataFrame(rows)
     if df.empty or "mae_deg" not in df.columns:
-        return rows, []
+        return rows, [], []
     eligible = df[
         np.isfinite(pd.to_numeric(df["mae_deg"], errors="coerce"))
         & (df["dominant_event"].isin([0, 1]))
         & (df["dominant_context"] >= 0)
     ].copy()
     remove_indices: set[int] = set()
+    thresholds: list[dict[str, Any]] = []
     for (_ctx, _evt), group in eligible.groupby(["dominant_context", "dominant_event"]):
-        if len(group) < 4:
+        fit_group = group if fit_subject_ids is None else group[group["subject_id"].isin(fit_subject_ids)]
+        threshold_info: dict[str, Any] = {
+            "dominant_context": int(_ctx),
+            "dominant_event": int(_evt),
+            "n_all_eligible": int(len(group)),
+            "n_threshold_fit": int(len(fit_group)),
+        }
+        if len(fit_group) < 4:
+            threshold_info["status"] = "insufficient_training_sessions"
+            thresholds.append(threshold_info)
             continue
-        q1 = float(group["mae_deg"].quantile(0.25))
-        q3 = float(group["mae_deg"].quantile(0.75))
+        q1 = float(fit_group["mae_deg"].quantile(0.25))
+        q3 = float(fit_group["mae_deg"].quantile(0.75))
         upper = q3 + k * (q3 - q1)
-        remove_indices.update(int(i) for i in group[group["mae_deg"] > upper].index)
+        candidates = group[group["mae_deg"] > upper]
+        if removal_subject_ids is not None:
+            candidates = candidates[candidates["subject_id"].isin(removal_subject_ids)]
+        remove_indices.update(int(i) for i in candidates.index)
+        threshold_info.update({"status": "applied", "q1": q1, "q3": q3, "upper": upper, "n_removed": int(len(candidates))})
+        thresholds.append(threshold_info)
     removed = []
     kept = []
     for idx, row in enumerate(rows):
@@ -454,17 +506,29 @@ def apply_iqr_filter(rows: list[dict[str, Any]], output_dir: Path, k: float = 1.
             r["iqr_removed"] = False
             kept.append(r)
     write_csv(output_dir / "_iqr_removed_sessions.csv", removed)
-    return kept, removed
+    (output_dir / "_iqr_thresholds.json").write_text(
+        json.dumps(thresholds, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+    return kept, removed, thresholds
 
 
-def run_job(job: dict[str, Any], base_dir: Path, norm_path: Path, workers: int) -> dict[str, Any]:
+def run_job(
+    job: dict[str, Any],
+    base_dir: Path,
+    norm_path: Path,
+    workers: int,
+    fold: dict[str, Any] | None,
+    iqr_train_only: bool,
+) -> dict[str, Any]:
     input_dir = base_dir / str(job["input_name"])
-    output_dir = base_dir / str(job["output_name"])
+    fold_suffix = f"_{fold['fold_name']}" if fold is not None else ""
+    output_dir = base_dir / f"{job['output_name']}{fold_suffix}"
     files = sorted(p for p in input_dir.rglob("*.csv") if not p.name.startswith("_")) if input_dir.exists() else []
     if not files:
         return {"label": job["label"], "files": 0, "converted": 0, "removed_by_iqr": 0}
     output_dir.mkdir(parents=True, exist_ok=True)
-    tasks = [(str(p), str(input_dir), str(output_dir), str(norm_path)) for p in files]
+    fold_index = int(fold["fold_index"]) if fold is not None else None
+    tasks = [(str(p), str(input_dir), str(output_dir), str(norm_path), fold_index) for p in files]
     n_workers = max(1, min(workers, len(tasks)))
     print(f"[{job['label']}] converting {len(tasks)} files with {n_workers} workers")
     if n_workers == 1:
@@ -474,8 +538,19 @@ def run_job(job: dict[str, Any], base_dir: Path, norm_path: Path, workers: int) 
             rows = list(pool.imap_unordered(process_one, tasks, chunksize=1))
     rows = sorted(rows, key=lambda r: r["input"])
     removed: list[dict[str, Any]] = []
+    thresholds: list[dict[str, Any]] = []
     if bool(job.get("apply_iqr", False)):
-        rows, removed = apply_iqr_filter(rows, output_dir, k=1.5)
+        if fold is not None and iqr_train_only:
+            train_subjects = set(fold["train_subject_ids"])
+            rows, removed, thresholds = apply_iqr_filter(
+                rows,
+                output_dir,
+                k=1.5,
+                fit_subject_ids=train_subjects,
+                removal_subject_ids=train_subjects,
+            )
+        else:
+            rows, removed, thresholds = apply_iqr_filter(rows, output_dir, k=1.5)
     write_csv(output_dir / "_npy_manifest.csv", rows)
     summary = {
         "label": job["label"],
@@ -489,30 +564,114 @@ def run_job(job: dict[str, Any], base_dir: Path, norm_path: Path, workers: int) 
         "regression_coordinate_mode": "yaw_pitch",
         "iqr_enabled": bool(job.get("apply_iqr", False)),
         "iqr_k": 1.5 if bool(job.get("apply_iqr", False)) else None,
+        "fold_index": fold_index,
+        "normalization_fit_subject_ids": fold.get("normalization_fit_subject_ids") if fold else "all_csv_explicit",
+        "iqr_threshold_fit_subject_ids": fold.get("train_subject_ids") if (fold and iqr_train_only) else "all_trials",
+        "iqr_removal_subject_ids": fold.get("train_subject_ids") if (fold and iqr_train_only) else "all_trials",
+        "iqr_threshold_groups": thresholds,
+        "iqr_policy": (
+            "Validation and test trials were not excluded based on target-referenced error IQR "
+            "and did not contribute to threshold estimation."
+            if fold and iqr_train_only
+            else "IQR was applied to all eligible trials (explicit legacy/global mode)."
+        ),
     }
     (output_dir / "process_to_npy_summary.json").write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
     return summary
+
+
+def write_fold_provenance(base_dir: Path, fold: dict[str, Any], norm_path: Path, all_files: list[Path]) -> None:
+    main_dir = base_dir / f"npy_data_{fold['fold_name']}"
+    main_dir.mkdir(parents=True, exist_ok=True)
+    norm_fit_subjects = set(fold["normalization_fit_subject_ids"])
+    fit_files = files_for_subjects(all_files, norm_fit_subjects)
+    fit_subjects_seen = sorted({subject_id_for_csv(path) for path in fit_files})
+    test_subjects = set(fold["test_subject_ids"])
+    leaked = sorted(test_subjects & set(fit_subjects_seen))
+    if leaked:
+        raise RuntimeError(f"Leakage guard tripped for {fold['fold_name']}: test subjects {leaked} entered normalization.")
+    provenance = {
+        **fold,
+        "normalization_params": str(norm_path),
+        "normalization_fit_subjects_seen": fit_subjects_seen,
+        "normalization_fit_file_count": len(fit_files),
+        "leaked_test_subjects": leaked,
+        "iqr_threshold_fit_subject_ids": fold["train_subject_ids"],
+        "iqr_removal_subject_ids": fold["train_subject_ids"],
+        "iqr_policy": "Validation and test trials were not excluded based on target-referenced error IQR and did not contribute to threshold estimation.",
+    }
+    (main_dir / f"{fold['fold_name']}_preprocessing_provenance.json").write_text(
+        json.dumps(provenance, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Convert processed CSV files to 18D NPY tensors.")
     parser.add_argument("--base-dir", type=Path, default=SCRIPT_DIR)
     parser.add_argument("--workers", type=int, default=max(1, cpu_count() - 2))
-    return parser.parse_args()
+    parser.add_argument(
+        "--fold-index",
+        type=int,
+        action="append",
+        help="Process only this 0-based CV fold. May be supplied more than once; default processes all folds.",
+    )
+    parser.add_argument(
+        "--global-normalization-all-csv",
+        action="store_true",
+        help="Explicit legacy mode: write one unsuffixed dataset using normalization fit on all CSV files.",
+    )
+    iqr_policy = parser.add_mutually_exclusive_group()
+    iqr_policy.add_argument(
+        "--iqr-train-only",
+        dest="iqr_train_only",
+        action="store_true",
+        default=True,
+        help=(
+            "Default CV policy: estimate IQR thresholds from training trials and remove only training trials; "
+            "validation/test trials are retained."
+        ),
+    )
+    iqr_policy.add_argument(
+        "--iqr-all-trials",
+        dest="iqr_train_only",
+        action="store_false",
+        help="Explicit legacy mode: let validation/test trials contribute to and be removed by IQR filtering.",
+    )
+    args = parser.parse_args()
+    if args.global_normalization_all_csv and args.fold_index:
+        parser.error("--global-normalization-all-csv cannot be combined with --fold-index")
+    return args
 
 
 def main() -> None:
     args = parse_args()
     workers = max(1, int(args.workers))
-    norm_path = prepare_norm_params(args.base_dir, DATA_JOBS, workers)
     summaries = []
-    for job in DATA_JOBS:
-        summaries.append(run_job(job, args.base_dir, norm_path, workers))
+    all_files = collect_csv_files(args.base_dir, [j["input_name"] for j in DATA_JOBS])
+    if not all_files:
+        raise FileNotFoundError("No processed CSV files found")
+
+    if args.global_normalization_all_csv:
+        norm_path = prepare_norm_params(args.base_dir / "global_norm_params_shared.json", all_files, workers)
+        for job in DATA_JOBS:
+            summaries.append(run_job(job, args.base_dir, norm_path, workers, fold=None, iqr_train_only=False))
+    else:
+        validate_cv_subjects(all_files)
+        requested_folds = args.fold_index or list(range(fold_split.N_FOLDS))
+        for fold_index in requested_folds:
+            fold = fold_split.build_fold_split(fold_index)
+            norm_files = files_for_subjects(all_files, set(fold["normalization_fit_subject_ids"]))
+            norm_path = prepare_norm_params(
+                args.base_dir / f"global_norm_params_{fold['fold_name']}.json", norm_files, workers
+            )
+            write_fold_provenance(args.base_dir, fold, norm_path, all_files)
+            for job in DATA_JOBS:
+                summaries.append(run_job(job, args.base_dir, norm_path, workers, fold=fold, iqr_train_only=args.iqr_train_only))
     (args.base_dir / "process_to_npy_all_summary.json").write_text(
         json.dumps(summaries, ensure_ascii=False, indent=2),
         encoding="utf-8",
     )
-    print(f"Done. Shared norm: {norm_path}")
+    print("Done. Independent fold preprocessing completed." if not args.global_normalization_all_csv else "Done. Explicit all-CSV global preprocessing completed.")
 
 
 if __name__ == "__main__":

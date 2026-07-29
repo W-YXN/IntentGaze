@@ -18,6 +18,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+import fold_split
+
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 
@@ -298,6 +300,47 @@ def resolve_train_files(train_dir: Path, train_list: Path | None) -> list[Path]:
     return files
 
 
+def validate_fold_training_files(
+    files: list[Path], fold: dict[str, Any], normalization_params: dict[str, Any]
+) -> list[Path]:
+    """Keep only this fold's train subjects and verify fold-specific preprocessing."""
+    train_subjects = set(fold["train_subject_ids"])
+    selected: list[Path] = []
+    for path in files:
+        payload = np.load(path, allow_pickle=True).item()
+        subject_id = int(payload.get("subject_id", -1))
+        if subject_id not in train_subjects:
+            continue
+        if payload.get("fold_index") != fold["fold_index"]:
+            raise ValueError(f"{path}: expected fold_index {fold['fold_index']}, found {payload.get('fold_index')}")
+        if payload.get("norm_params") != normalization_params:
+            raise ValueError(f"{path}: normalization parameters do not match {fold['fold_name']}")
+        selected.append(path)
+    if not selected:
+        raise FileNotFoundError(f"No train-subject NPY files found for {fold['fold_name']}")
+    return selected
+
+
+def configure_fold(args: argparse.Namespace) -> None:
+    if args.fold_index is None:
+        args.train_dir = args.train_dir or (SCRIPT_DIR / "npy_data")
+        args.output_dir = args.output_dir or (SCRIPT_DIR / "trained_regression")
+        args.fold_info = None
+        args.fold_norm_params = None
+        return
+    if args.train_dir is not None:
+        raise ValueError("--train-dir cannot be combined with --fold-index; use --fold-base-dir instead")
+    fold = fold_split.build_fold_split(args.fold_index)
+    args.train_dir = args.fold_base_dir / f"npy_data_{fold['fold_name']}"
+    args.output_dir = args.output_dir or (args.fold_base_dir / f"trained_regression_{fold['fold_name']}")
+    norm_path = args.fold_base_dir / f"global_norm_params_{fold['fold_name']}.json"
+    if not norm_path.exists():
+        raise FileNotFoundError(f"Missing fold-specific normalization parameters: {norm_path}")
+    args.fold_info = fold
+    args.fold_norm_params = json.loads(norm_path.read_text(encoding="utf-8"))
+    args.fold_norm_path = norm_path
+
+
 def cosine_restart_lr_factor(
     epoch: int,
     warmup_epochs: int,
@@ -327,6 +370,8 @@ def train(args: argparse.Namespace) -> None:
     set_seed(args.seed)
     device = torch.device(args.device if args.device else ("cuda" if torch.cuda.is_available() else "cpu"))
     train_files = resolve_train_files(args.train_dir, args.train_list)
+    if args.fold_info is not None:
+        train_files = validate_fold_training_files(train_files, args.fold_info, args.fold_norm_params)
     out_dir = args.output_dir
     out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -339,6 +384,8 @@ def train(args: argparse.Namespace) -> None:
         "task": "gaze_regression",
         "train_dir": str(args.train_dir),
         "train_list": str(args.train_list) if args.train_list else "",
+        "fold": args.fold_info,
+        "fold_normalization_params": str(args.fold_norm_path) if args.fold_info else "",
         "output_dir": str(out_dir),
         "epochs": args.epochs,
         "batch_size": args.batch_size,
@@ -441,9 +488,11 @@ def train(args: argparse.Namespace) -> None:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Train the published IntentGaze regression model.")
-    parser.add_argument("--train-dir", type=Path, default=SCRIPT_DIR / "npy_data", help="Directory containing training .npy files.")
+    parser.add_argument("--train-dir", type=Path, default=None, help="Directory containing training .npy files.")
     parser.add_argument("--train-list", type=Path, default=None, help="Optional text/CSV list of training .npy files.")
-    parser.add_argument("--output-dir", type=Path, default=SCRIPT_DIR / "trained_regression", help="Output directory.")
+    parser.add_argument("--output-dir", type=Path, default=None, help="Output directory.")
+    parser.add_argument("--fold-index", type=int, default=None, help="0-based CV fold; uses matching fold NPY data and normalization parameters.")
+    parser.add_argument("--fold-base-dir", type=Path, default=SCRIPT_DIR, help="Directory containing fold-specific NPY and normalization files.")
     parser.add_argument("--epochs", type=int, required=True, help="Number of epochs to train.")
     parser.add_argument("--batch-size", type=int, default=32768)
     parser.add_argument("--lr", type=float, default=1.6e-3)
@@ -463,6 +512,7 @@ def main() -> None:
     args = parse_args()
     if args.epochs <= 0:
         raise ValueError("--epochs must be positive")
+    configure_fold(args)
     train(args)
 
 

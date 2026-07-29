@@ -60,7 +60,8 @@ raw CSV (from OSF)
  └─ 01-resample_dataset.py        → resampled_csv/
      └─ 02-split_sessions.py      → session_csv/, session_csv_transition/
          └─ 03-process_pitch_yaw.py → processed_csv/, processed_csv_transition/
-             └─ 04-process_to_npy.py → npy_data/, npy_data_transition/
+             └─ 04-process_to_npy.py → npy_data_fold01/ … npy_data_fold07/
+                                      → npy_data_transition_fold01/ … npy_data_transition_fold07/
                  ├─ 05-train_regression.py        → trained_regression/
                  └─ 06-train_saccade_detector.py  → trained_saccade_detector/
 ```
@@ -75,9 +76,15 @@ python 01-resample_dataset.py
 python 02-split_sessions.py
 python 03-process_pitch_yaw.py
 python 04-process_to_npy.py
-python 05-train_regression.py       --epochs 160
-python 06-train_saccade_detector.py --stage1-epochs 80 --stage2-epochs 40
+python 05-train_regression.py       --fold-index 0 --epochs 160
+python 06-train_saccade_detector.py --fold-index 0 --stage1-epochs 80 --stage2-epochs 40
 ```
+
+Stage 04 processes all seven subject-held-out folds by default.  Each fold has
+its own normalization parameters, and `--fold-index` makes each training script
+select the matching NPY directories, normalization parameters, and training
+subjects.  Use `--global-normalization-all-csv` on stage 04 only when an
+unsplit, all-CSV normalization run is explicitly intended.
 
 The epoch counts above match those reported in the paper. All other
 hyperparameters (batch size, learning rates, weight decay, focal-loss `gamma`/
