@@ -1,16 +1,17 @@
 # IntentGaze Code
 
+[![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
+[![Python](https://img.shields.io/badge/Python-3.10%2B-3776AB.svg)](https://www.python.org/)
+
 Data-processing pipeline and training scripts accompanying the IntentGaze paper.
-The dataset is released separately and is **not** included in this repository.
+The accompanying dataset is distributed separately through Zenodo.
 
 ## Data
 
-The dataset is hosted on OSF (anonymous view-only link for blind review):
-
-<https://osf.io/tfjgu/overview?view_only=41d07c32210741c6995b99b551e7171e>
+[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.21933665.svg)](https://doi.org/10.5281/zenodo.21933665)
 
 Per-frame schema, directory layout, and anonymization notes are documented in the
-`README.md` on OSF. The dataset is published as a split ZIP archive; reconstruct
+dataset metadata supplied with the Zenodo archive. The dataset is published as a split ZIP archive; reconstruct
 and extract it as follows:
 
 ```bash
@@ -34,7 +35,7 @@ Code/
 ├── 05-train_regression.py
 ├── 06-train_saccade_detector.py
 ├── requirements.txt
-└── Dataset/              <-- extract the OSF archive directly here
+└── Dataset/              <-- extract the Zenodo archive directly here
     ├── Lying/
     ├── Sitting/
     └── ...
@@ -56,7 +57,7 @@ processing scripts (01-04) run on CPU.
 ## Pipeline
 
 ```
-raw CSV (from OSF)
+raw CSV (from Zenodo)
  └─ 01-resample_dataset.py        → resampled_csv/
      └─ 02-split_sessions.py      → session_csv/, session_csv_transition/
          └─ 03-process_pitch_yaw.py → processed_csv/, processed_csv_transition/
@@ -94,8 +95,8 @@ reproduction. The default `--seed 42` is used throughout. Run any script with
 `--help` for the full list of flags.
 
 The training scripts save a checkpoint for every epoch
-(`epoch_XXX.pt`, `stageN_epoch_XXX.pt`); per-epoch validation selection is
-performed externally and is not part of these scripts.
+(`epoch_XXX.pt`, `stageN_epoch_XXX.pt`). Per-epoch validation and checkpoint
+selection are performed externally.
 
 ## Outputs
 
@@ -107,9 +108,26 @@ directories:
 - `trained_saccade_detector/stage1_epoch_XXX.pt` and `stage2_epoch_XXX.pt`
 
 Selecting the checkpoint to evaluate on the held-out test split (e.g. by the
-minimum loss on a validation split) is performed externally; the training
-scripts intentionally do not write a single "final" or "best" file.
+minimum loss on a validation split) is performed externally, with all per-epoch
+checkpoints retained for reproducibility.
 
----
+## License
 
-License and citation will be added after the blind-review period.
+This code is licensed under the [Apache License 2.0](LICENSE).
+
+## Citation
+
+Please cite the associated IntentGaze paper when using this code. For direct dataset reuse, cite:
+
+```bibtex
+@dataset{hu2026_IntentGazeDataset,
+  author = {Hu, Xuning and Yan, Xinan and Zhang, Yichuan and Wei, Yushi and Li, Yue and Stuerzlinger, Wolfgang and Liang, Hai-Ning},
+  title = {IntentGaze Dataset: Official Data for "IntentGaze: Task-Aligned Gaze Correction for Stable and Responsive Gaze Interaction in XR"},
+  month = aug,
+  year = 2026,
+  publisher = {Zenodo},
+  version = {1.0.0},
+  doi = {10.5281/zenodo.21933665},
+  url = {https://doi.org/10.5281/zenodo.21933665},
+}
+```
