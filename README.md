@@ -8,7 +8,7 @@ The accompanying dataset is distributed separately through Zenodo.
 
 ## Data
 
-[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.21933665.svg)](https://doi.org/10.5281/zenodo.21933665)
+[![DOI](https://img.shields.io/badge/DOI-10.5281/zenodo.21933665-007ec6)](https://doi.org/10.5281/zenodo.21933665)
 
 Per-frame schema, directory layout, and anonymization notes are documented in the
 dataset metadata supplied with the Zenodo archive. The dataset is published as a split ZIP archive; reconstruct
@@ -117,7 +117,9 @@ This code is licensed under the [Apache License 2.0](LICENSE).
 
 ## Citation
 
-Please cite the associated IntentGaze paper when using this code. For direct dataset reuse, cite:
+Please cite the associated IntentGaze paper when using this code.
+
+For direct dataset reuse, cite:
 
 ```bibtex
 @dataset{hu2026_IntentGazeDataset,
